@@ -1253,153 +1253,85 @@ const { initGridFS } = require('./utils/gridfs');
 
 const app = express();
 
-// Log all environment info at startup
-console.log('🚀 Server starting...');
-console.log('   Environment:', process.env.NODE_ENV || 'development');
-console.log('   Vercel:', !!process.env.VERCEL);
-console.log('   Region:', process.env.VERCEL_REGION || 'unknown');
-console.log('   MongoDB URI exists:', !!process.env.MONGODB_URI);
-
-// CORS configuration
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-}));
-
 // Middleware
+app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Request logging middleware
-app.use((req, res, next) => {
-  console.log(`📥 ${req.method} ${req.path}`);
-  next();
-});
-
-// MongoDB Connection
+// MongoDB Connection with proper error handling
 let isConnected = false;
-let connectionError = null;
 
 const connectDB = async () => {
-  if (isConnected && mongoose.connection.readyState === 1) {
-    return true;
+  if (isConnected) {
+    console.log('✅ Using existing MongoDB connection');
+    return;
   }
 
   try {
-    console.log('🔄 Connecting to MongoDB...');
-    
     const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
     
     if (!MONGODB_URI) {
-      const error = 'MONGODB_URI not found in environment variables';
-      console.error('❌', error);
-      connectionError = error;
-      throw new Error(error);
+      throw new Error('MONGODB_URI is not defined in environment variables');
     }
 
-    // Log connection string (masked)
-    const maskedUri = MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@');
-    console.log('   URI (masked):', maskedUri);
-
-    // Close existing connection if any
-    if (mongoose.connection.readyState !== 0) {
-      console.log('   Closing existing connection...');
-      await mongoose.connection.close();
-    }
-
-    // Connect with timeout
-    await Promise.race([
-      mongoose.connect(MONGODB_URI, {
-        serverSelectionTimeoutMS: 10000,
-        socketTimeoutMS: 45000,
-        maxPoolSize: 10,
-        minPoolSize: 2,
-      }),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Connection timeout (10s)')), 10000)
-      )
-    ]);
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+    });
 
     isConnected = true;
-    connectionError = null;
+    console.log('✅ MongoDB connected:', mongoose.connection.db.databaseName);
     
-    console.log('✅ MongoDB connected');
-    console.log('   Database:', mongoose.connection.db.databaseName);
-    console.log('   Host:', mongoose.connection.host);
-    
-    // Initialize GridFS
-    try {
-      await initGridFS();
-      console.log('✅ GridFS ready');
-    } catch (gridfsError) {
-      console.error('⚠️ GridFS initialization failed:', gridfsError.message);
-      // Don't throw - let the app start anyway
-    }
-    
-    return true;
+    // Initialize GridFS after connection
+    await initGridFS();
+    console.log('✅ GridFS initialized');
   } catch (error) {
+    console.error('❌ MongoDB connection error:', error);
     isConnected = false;
-    connectionError = error.message;
-    console.error('❌ MongoDB connection failed:', error.message);
-    
-    // Log detailed error for debugging
-    if (error.name === 'MongooseServerSelectionError') {
-      console.error('   Possible causes:');
-      console.error('   1. Wrong connection string');
-      console.error('   2. IP not whitelisted (add 0.0.0.0/0)');
-      console.error('   3. Wrong database user/password');
-      console.error('   4. Network issues');
-    }
-    
     throw error;
   }
 };
 
-// Middleware to ensure DB connection
+// Middleware to ensure DB connection before each request
 app.use(async (req, res, next) => {
   try {
     await connectDB();
     next();
   } catch (error) {
-    console.error('❌ Request blocked - DB not connected:', error.message);
-    res.status(503).json({
+    res.status(500).json({
       success: false,
-      message: 'Database connection unavailable',
-      error: connectionError || error.message,
-      hint: 'Check Vercel environment variables and MongoDB Atlas settings',
-      timestamp: new Date().toISOString()
+      message: 'Database connection failed',
+      error: error.message
     });
   }
 });
 
 // Health check route
 app.get('/api/health', async (req, res) => {
-  const dbState = mongoose.connection.readyState;
-  const states = {
-    0: 'disconnected',
-    1: 'connected',
-    2: 'connecting',
-    3: 'disconnecting'
-  };
+  try {
+    const dbState = mongoose.connection.readyState;
+    const states = {
+      0: 'disconnected',
+      1: 'connected',
+      2: 'connecting',
+      3: 'disconnecting'
+    };
 
-  const health = {
-    success: dbState === 1,
-    message: dbState === 1 ? 'Server is healthy' : 'Server not ready',
-    timestamp: new Date().toISOString(),
-    database: mongoose.connection.db?.databaseName || 'unknown',
-    dbState: states[dbState],
-    environment: process.env.NODE_ENV || 'development',
-    vercelRegion: process.env.VERCEL_REGION || 'unknown',
-    uptime: process.uptime(),
-  };
-
-  if (connectionError) {
-    health.lastError = connectionError;
+    res.status(200).json({
+      success: true,
+      message: 'Server is running',
+      timestamp: new Date().toISOString(),
+      database: mongoose.connection.db?.databaseName || 'unknown',
+      dbState: states[dbState],
+      environment: process.env.NODE_ENV || 'development'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Health check failed',
+      error: error.message
+    });
   }
-
-  res.status(dbState === 1 ? 200 : 503).json(health);
 });
 
 // File routes
@@ -1409,81 +1341,43 @@ app.use('/api', fileRoutes);
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'MyVault File Upload API',
-    version: '1.0.0',
+    message: 'File Upload API is running',
     endpoints: {
-      health: 'GET /api/health',
+      health: '/api/health',
       upload: 'POST /api/upload-files',
       getFile: 'GET /api/file/:fileId',
       getNoteFiles: 'GET /api/files/:userId/:noteId',
-      getUserFiles: 'GET /api/user-files/:userId',
-      deleteNote: 'DELETE /api/files/:userId/:noteId',
-      deleteFile: 'DELETE /api/files/:userId/:noteId/:fileName'
-    },
-    docs: 'https://github.com/yourusername/myvault',
-    timestamp: new Date().toISOString()
+      getUserFiles: 'GET /api/user-files/:userId'
+    }
   });
 });
 
-// 404 for API routes
-app.use('/api/*', (req, res) => {
-  console.log('❌ 404:', req.method, req.path);
-  res.status(404).json({
-    success: false,
-    message: 'API endpoint not found',
-    path: req.path,
-    method: req.method
-  });
-});
-
-// Global 404
+// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     success: false,
     message: 'Route not found',
     path: req.path,
-    hint: 'API routes should start with /api'
+    method: req.method
   });
 });
 
-// Global error handler
+// Error handler
 app.use((err, req, res, next) => {
-  console.error('💥 Unhandled error:', err);
-  console.error('   Stack:', err.stack);
-  
+  console.error('❌ Server error:', err);
   res.status(500).json({
     success: false,
     message: 'Internal server error',
-    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong',
-    timestamp: new Date().toISOString()
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
   });
 });
 
-// Handle uncaught errors
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 Unhandled Rejection at:', promise);
-  console.error('   Reason:', reason);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('💥 Uncaught Exception:', error);
-  console.error('   Stack:', error.stack);
-});
-
 // For local development
-if (!process.env.VERCEL) {
+if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, async () => {
-    console.log(`\n🚀 Server running on http://localhost:${PORT}`);
-    console.log(`📝 Health: http://localhost:${PORT}/api/health\n`);
-    
-    try {
-      await connectDB();
-      console.log('✅ Ready to accept requests\n');
-    } catch (error) {
-      console.error('❌ Startup failed:', error.message);
-      console.error('   Server running but database unavailable\n');
-    }
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    connectDB();
   });
 }
 
