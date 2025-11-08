@@ -1,1 +1,15 @@
-node_modules
+# Ignore environment variables
+.env
+.env.local
+.env.production
+.env.development
+
+# Node.js files
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Build files
+.vercel
+dist/
+build/
