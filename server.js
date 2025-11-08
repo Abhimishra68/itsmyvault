@@ -1249,20 +1249,137 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const fileRoutes = require('./routes/fileRoutes');
+const { initGridFS } = require('./utils/gridfs');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
 
+// Middleware
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// MongoDB Connection with proper error handling
+let isConnected = false;
+
+const connectDB = async () => {
+  if (isConnected) {
+    console.log('✅ Using existing MongoDB connection');
+    return;
+  }
+
+  try {
+    const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
+    
+    if (!MONGODB_URI) {
+      throw new Error('MONGODB_URI is not defined in environment variables');
+    }
+
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+    });
+
+    isConnected = true;
+    console.log('✅ MongoDB connected:', mongoose.connection.db.databaseName);
+    
+    // Initialize GridFS after connection
+    await initGridFS();
+    console.log('✅ GridFS initialized');
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error);
+    isConnected = false;
+    throw error;
+  }
+};
+
+// Middleware to ensure DB connection before each request
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Database connection failed',
+      error: error.message
+    });
+  }
+});
+
+// Health check route
 app.get('/api/health', async (req, res) => {
-  res.status(200).json({
+  try {
+    const dbState = mongoose.connection.readyState;
+    const states = {
+      0: 'disconnected',
+      1: 'connected',
+      2: 'connecting',
+      3: 'disconnecting'
+    };
+
+    res.status(200).json({
+      success: true,
+      message: 'Server is running',
+      timestamp: new Date().toISOString(),
+      database: mongoose.connection.db?.databaseName || 'unknown',
+      dbState: states[dbState],
+      environment: process.env.NODE_ENV || 'development'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Health check failed',
+      error: error.message
+    });
+  }
+});
+
+// File routes
+app.use('/api', fileRoutes);
+
+// Root route
+app.get('/', (req, res) => {
+  res.json({
     success: true,
-    message: 'Server is running',
-    timestamp: new Date().toISOString(),
-    database: mongoose.connection.db?.databaseName || 'unknown',
+    message: 'File Upload API is running',
+    endpoints: {
+      health: '/api/health',
+      upload: 'POST /api/upload-files',
+      getFile: 'GET /api/file/:fileId',
+      getNoteFiles: 'GET /api/files/:userId/:noteId',
+      getUserFiles: 'GET /api/user-files/:userId'
+    }
   });
 });
 
-app.use('/api', fileRoutes);
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Route not found',
+    path: req.path,
+    method: req.method
+  });
+});
 
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('❌ Server error:', err);
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+  });
+});
+
+// For local development
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    connectDB();
+  });
+}
+
+// Export for Vercel
 module.exports = app;
