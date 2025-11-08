@@ -1245,47 +1245,24 @@
 //   console.log(`✅ Server running on port ${PORT}`);
 //   console.log(`🌐 Health check: http://<YOUR-IP>:${PORT}/api/health`);
 // });
-
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const fileRoutes = require('./routes/fileRoutes');
-const { initGridFS } = require('./utils/gridfs');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ✅ MongoDB connect function
-async function connectToDB() {
-  if (mongoose.connection.readyState === 1) return;
-  try {
-    await mongoose.connect(process.env.MONGODB_URI);
-    initGridFS(mongoose.connection);
-    console.log('✅ MongoDB connected & GridFS initialized');
-  } catch (err) {
-    console.error('❌ MongoDB connection error:', err);
-  }
-}
-
-// ✅ Call it on cold start
-connectToDB();
-
-// ✅ Routes
 app.get('/api/health', async (req, res) => {
-  try {
-    res.status(200).json({
-      success: true,
-      message: 'Server is running',
-      timestamp: new Date().toISOString(),
-      database: mongoose.connection.db?.databaseName || 'unknown'
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  res.status(200).json({
+    success: true,
+    message: 'Server is running',
+    timestamp: new Date().toISOString(),
+    database: mongoose.connection.db?.databaseName || 'unknown',
+  });
 });
 
 app.use('/api', fileRoutes);
 
-// ✅ Export only (no app.listen)
 module.exports = app;
