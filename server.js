@@ -1246,8 +1246,6 @@
 //   console.log(`🌐 Health check: http://<YOUR-IP>:${PORT}/api/health`);
 // });
 
-
-require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -1255,44 +1253,39 @@ const fileRoutes = require('./routes/fileRoutes');
 const { initGridFS } = require('./utils/gridfs');
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
-const MONGODB_URI = process.env.MONGODB_URI;
-
-// ✅ Initialize MongoDB connection only once
-let isConnected = false;
-async function connectDB() {
-  if (isConnected) return;
+// ✅ MongoDB connect function
+async function connectToDB() {
+  if (mongoose.connection.readyState === 1) return;
   try {
-    const conn = await mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS: 45000,
-      family: 4,
-    });
-    initGridFS(conn.connection);
-    isConnected = true;
-    console.log('✅ Connected to MongoDB and GridFS initialized');
+    await mongoose.connect(process.env.MONGODB_URI);
+    initGridFS(mongoose.connection);
+    console.log('✅ MongoDB connected & GridFS initialized');
   } catch (err) {
     console.error('❌ MongoDB connection error:', err);
   }
 }
 
-connectDB();
-
-// ✅ Health check route
-app.get('/api/health', async (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'Server is running',
-    timestamp: new Date().toISOString(),
-    database: mongoose.connection.db?.databaseName || 'unknown',
-  });
-});
+// ✅ Call it on cold start
+connectToDB();
 
 // ✅ Routes
+app.get('/api/health', async (req, res) => {
+  try {
+    res.status(200).json({
+      success: true,
+      message: 'Server is running',
+      timestamp: new Date().toISOString(),
+      database: mongoose.connection.db?.databaseName || 'unknown'
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.use('/api', fileRoutes);
 
-// ✅ Do not app.listen() — export app for Vercel
+// ✅ Export only (no app.listen)
 module.exports = app;
