@@ -1245,7 +1245,10 @@
 //   console.log(`✅ Server running on port ${PORT}`);
 //   console.log(`🌐 Health check: http://<YOUR-IP>:${PORT}/api/health`);
 // });
+// server.js - Fixed for Render deployment
+
 const express = require('express');
+const mongoose = require('mongoose');
 const cors = require('cors');
 const fileRoutes = require('./routes/fileRoutes');
 
@@ -1253,72 +1256,135 @@ const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Health check
-app.get('/api/health', async (req, res) => {
-  const { testGridFS } = require('./utils/gridfs');
-  
-  try {
-    const isReady = await testGridFS();
-    
-    res.status(isReady ? 200 : 503).json({
-      success: isReady,
-      message: isReady ? 'Server is running' : 'GridFS not ready',
-      timestamp: new Date().toISOString(),
-      environment: process.env.NODE_ENV || 'development'
-    });
-  } catch (error) {
-    res.status(503).json({
-      success: false,
-      message: 'Health check failed',
-      error: error.message
-    });
-  }
+// Environment variables
+const PORT = process.env.PORT || 3000;
+const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
+
+if (!MONGODB_URI) {
+  console.error('❌ MONGODB_URI environment variable is not set!');
+  console.error('Please set it in Render dashboard under Environment Variables');
+  process.exit(1);
+}
+
+// Health check route (BEFORE other routes)
+app.get('/health', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'Server is running',
+    timestamp: new Date().toISOString(),
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    environment: process.env.NODE_ENV || 'development'
+  });
 });
-
-// File routes
-app.use('/api', fileRoutes);
 
 // Root route
 app.get('/', (req, res) => {
-  res.json({
-    success: true,
-    message: 'File Upload API',
+  res.json({ 
+    success: true, 
+    message: 'MyVault API Server',
+    version: '1.0.0',
     endpoints: {
-      health: '/api/health',
-      upload: 'POST /api/upload-files'
+      health: '/health',
+      uploadFiles: 'POST /api/upload-files',
+      getFile: 'GET /api/file/:fileId',
+      getFilesForNote: 'GET /api/files/:userId/:noteId',
+      deleteFiles: 'DELETE /api/files/:userId/:noteId'
     }
   });
 });
 
+// API routes
+app.use('/api', fileRoutes);
+
 // 404 handler
 app.use((req, res) => {
-  res.status(404).json({
-    success: false,
+  res.status(404).json({ 
+    success: false, 
     message: 'Route not found',
-    path: req.path
+    path: req.path 
   });
 });
 
 // Error handler
 app.use((err, req, res, next) => {
-  console.error('❌ Error:', err);
-  res.status(500).json({
-    success: false,
+  console.error('❌ Server error:', err);
+  res.status(500).json({ 
+    success: false, 
     message: 'Internal server error',
-    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+    error: process.env.NODE_ENV === 'development' ? err.message : 'An error occurred'
   });
 });
 
-// For local development
-if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-  });
+// MongoDB connection with better error handling
+async function connectDatabase() {
+  try {
+    console.log('🔄 Connecting to MongoDB...');
+    
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+      minPoolSize: 2,
+    });
+    
+    console.log('✅ MongoDB connected successfully');
+    console.log('📦 Database:', mongoose.connection.db.databaseName);
+    
+  } catch (error) {
+    console.error('❌ MongoDB connection failed:', error.message);
+    console.error('Connection string format: mongodb+srv://username:password@cluster.mongodb.net/database');
+    throw error;
+  }
 }
 
-// Export for Vercel
-module.exports = app;
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('⚠️ SIGTERM received, closing server...');
+  await mongoose.connection.close();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('⚠️ SIGINT received, closing server...');
+  await mongoose.connection.close();
+  process.exit(0);
+});
+
+// Uncaught exception handler
+process.on('uncaughtException', (error) => {
+  console.error('💥 Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
+// Start server
+async function startServer() {
+  try {
+    // Connect to database first
+    await connectDatabase();
+    
+    // Then start HTTP server
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log('🚀 Server started successfully');
+      console.log(`📍 Listening on port ${PORT}`);
+      console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log('✅ Ready to accept requests');
+    });
+    
+  } catch (error) {
+    console.error('💥 Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Start the server
+startServer();
+
+module.exports = app; // Export for testing
