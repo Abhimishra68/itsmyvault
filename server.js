@@ -1246,10 +1246,8 @@
 //   console.log(`🌐 Health check: http://<YOUR-IP>:${PORT}/api/health`);
 // });
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
 const fileRoutes = require('./routes/fileRoutes');
-const { ensureConnection } = require('./utils/gridfs');
 
 const app = express();
 
@@ -1258,52 +1256,21 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error('❌ Server error:', err);
-  res.status(500).json({
-    success: false,
-    message: 'Internal server error',
-    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
-  });
-});
-
-// CRITICAL: Middleware to ensure DB connection before each request
-app.use(async (req, res, next) => {
-  try {
-    await ensureConnection();
-    next();
-  } catch (error) {
-    console.error('❌ Database connection failed:', error);
-    res.status(503).json({
-      success: false,
-      message: 'Database connection unavailable',
-      error: error.message
-    });
-  }
-});
-
-// Health check route
+// Health check
 app.get('/api/health', async (req, res) => {
+  const { testGridFS } = require('./utils/gridfs');
+  
   try {
-    const dbState = mongoose.connection.readyState;
-    const states = {
-      0: 'disconnected',
-      1: 'connected',
-      2: 'connecting',
-      3: 'disconnecting'
-    };
-
-    res.status(dbState === 1 ? 200 : 503).json({
-      success: dbState === 1,
-      message: dbState === 1 ? 'Server is running' : 'Database not connected',
+    const isReady = await testGridFS();
+    
+    res.status(isReady ? 200 : 503).json({
+      success: isReady,
+      message: isReady ? 'Server is running' : 'GridFS not ready',
       timestamp: new Date().toISOString(),
-      database: mongoose.connection.db?.databaseName || 'unknown',
-      dbState: states[dbState],
       environment: process.env.NODE_ENV || 'development'
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(503).json({
       success: false,
       message: 'Health check failed',
       error: error.message
@@ -1318,13 +1285,10 @@ app.use('/api', fileRoutes);
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'File Upload API is running',
+    message: 'File Upload API',
     endpoints: {
       health: '/api/health',
-      upload: 'POST /api/upload-files',
-      getFile: 'GET /api/file/:fileId',
-      getNoteFiles: 'GET /api/files/:userId/:noteId',
-      getUserFiles: 'GET /api/user-files/:userId'
+      upload: 'POST /api/upload-files'
     }
   });
 });
@@ -1334,25 +1298,26 @@ app.use((req, res) => {
   res.status(404).json({
     success: false,
     message: 'Route not found',
-    path: req.path,
-    method: req.method
+    path: req.path
+  });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('❌ Error:', err);
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
   });
 });
 
 // For local development
 if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 3000;
-  
-  ensureConnection()
-    .then(() => {
-      app.listen(PORT, () => {
-        console.log(`🚀 Server running on port ${PORT}`);
-      });
-    })
-    .catch((error) => {
-      console.error('❌ Failed to start server:', error);
-      process.exit(1);
-    });
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
 }
 
 // Export for Vercel

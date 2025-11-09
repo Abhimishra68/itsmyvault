@@ -632,11 +632,19 @@ const { Readable } = require("stream");
 const FileUpload = require("../models/fileUpload");
 const { getGridFSBucket } = require("../utils/gridfs");
 
-// Helper for upload to GridFS with timeout
-const uploadToGridFS = (buffer, filename, contentType, metadata = {}) => {
+// Helper to upload to GridFS
+const uploadToGridFS = async (buffer, filename, contentType, metadata = {}) => {
   return new Promise(async (resolve, reject) => {
     try {
+      console.log(`📤 Uploading: ${filename}`);
+      
+      // Get bucket - this will connect to MongoDB if needed
       const gfsBucket = await getGridFSBucket();
+      
+      if (!gfsBucket) {
+        throw new Error('GridFS bucket not available');
+      }
+
       const readableStream = new Readable();
       readableStream.push(buffer);
       readableStream.push(null);
@@ -646,57 +654,60 @@ const uploadToGridFS = (buffer, filename, contentType, metadata = {}) => {
         contentType 
       });
       
-      // Timeout after 30 seconds
       const timeout = setTimeout(() => {
         uploadStream.destroy();
-        reject(new Error('Upload timeout'));
+        reject(new Error('Upload timeout after 30s'));
       }, 30000);
 
       uploadStream.on("error", (error) => {
         clearTimeout(timeout);
-        console.error("❌ GridFS upload error:", error);
+        console.error("❌ Upload error:", error);
         reject(error);
       });
       
       uploadStream.on("finish", (file) => {
         clearTimeout(timeout);
         if (!file || !file._id) {
-          reject(new Error("GridFS upload failed - no file ID returned"));
+          reject(new Error("No file ID returned"));
         } else {
-          console.log("✅ GridFS file uploaded:", file._id);
+          console.log("✅ Uploaded:", file._id);
           resolve(file);
         }
       });
 
       readableStream.pipe(uploadStream);
+      
     } catch (error) {
+      console.error("❌ Upload setup error:", error);
       reject(error);
     }
   });
 };
 
+// Helper to delete from GridFS
 const deleteFromGridFS = async (fileId) => {
   try {
     const gfsBucket = await getGridFSBucket();
     await gfsBucket.delete(new mongoose.Types.ObjectId(fileId));
-    console.log("🗑️ Deleted file from GridFS:", fileId);
+    console.log("🗑️ Deleted:", fileId);
   } catch (error) {
-    console.error("❌ Delete from GridFS error:", error);
+    console.error("❌ Delete error:", error);
     throw error;
   }
 };
 
+// Upload files
 exports.uploadFiles = async (req, res) => {
   const startTime = Date.now();
   
   try {
     const { userId, noteId, noteType } = req.body;
     
-    console.log("📥 Upload request received:");
-    console.log("   userId:", userId);
-    console.log("   noteId:", noteId);
-    console.log("   noteType:", noteType);
-    console.log("   files count:", req.files?.length || 0);
+    console.log("📥 Upload request:");
+    console.log("   User:", userId);
+    console.log("   Note:", noteId);
+    console.log("   Type:", noteType);
+    console.log("   Files:", req.files?.length || 0);
 
     // Validation
     if (!userId || !noteId || !noteType) {
@@ -713,8 +724,8 @@ exports.uploadFiles = async (req, res) => {
       });
     }
 
-    // Check file sizes (max 50MB per file for Vercel)
-    const maxSize = 50 * 1024 * 1024;
+    // Check file sizes
+    const maxSize = 50 * 1024 * 1024; // 50MB
     for (const file of req.files) {
       if (file.size > maxSize) {
         return res.status(400).json({
@@ -726,9 +737,9 @@ exports.uploadFiles = async (req, res) => {
 
     const fileData = [];
     
-    // Upload files sequentially to avoid overwhelming serverless
+    // Upload files one by one
     for (const file of req.files) {
-      console.log(`📎 Processing file: ${file.originalname} (${(file.size / 1024).toFixed(2)} KB)`);
+      console.log(`📁 Processing: ${file.originalname} (${(file.size / 1024).toFixed(1)} KB)`);
       
       const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
       const extension = path.extname(file.originalname);
@@ -739,12 +750,7 @@ exports.uploadFiles = async (req, res) => {
           file.buffer,
           gridfsFileName,
           file.mimetype,
-          { 
-            userId, 
-            noteId, 
-            noteType, 
-            originalName: file.originalname 
-          }
+          { userId, noteId, noteType, originalName: file.originalname }
         );
         
         fileData.push({
@@ -756,11 +762,12 @@ exports.uploadFiles = async (req, res) => {
           uploadedAt: new Date(),
         });
         
-        console.log(`✅ File uploaded: ${file.originalname} -> ${gridfsFile._id}`);
-      } catch (uploadError) {
-        console.error(`❌ Failed to upload ${file.originalname}:`, uploadError);
+        console.log(`✅ File uploaded: ${file.originalname}`);
         
-        // Clean up successfully uploaded files
+      } catch (uploadError) {
+        console.error(`❌ Failed: ${file.originalname}:`, uploadError);
+        
+        // Cleanup already uploaded files
         for (const uploaded of fileData) {
           try {
             await deleteFromGridFS(uploaded.gridfsFileId);
@@ -773,31 +780,24 @@ exports.uploadFiles = async (req, res) => {
       }
     }
 
-    // Save or update FileUpload document
+    // Save metadata to MongoDB
     let fileUpload = await FileUpload.findOne({ userId, noteId });
     
     if (fileUpload) {
-      console.log("📝 Updating existing FileUpload document");
+      console.log("📝 Updating existing record");
       fileUpload.files.push(...fileData);
       fileUpload.updatedAt = new Date();
     } else {
-      console.log("📝 Creating new FileUpload document");
-      fileUpload = new FileUpload({ 
-        userId, 
-        noteId, 
-        noteType, 
-        files: fileData 
-      });
+      console.log("📝 Creating new record");
+      fileUpload = new FileUpload({ userId, noteId, noteType, files: fileData });
     }
     
     await fileUpload.save();
-    console.log("💾 FileUpload document saved:", fileUpload._id);
+    console.log("💾 Metadata saved");
 
-    // Get host for URLs
     const host = req.get('host');
     const protocol = req.protocol;
 
-    // Prepare response with file URLs
     const fileUrls = fileData.map((file) => ({
       originalName: file.originalName,
       url: `${protocol}://${host}/api/file/${file.gridfsFileId}`,
@@ -812,12 +812,9 @@ exports.uploadFiles = async (req, res) => {
 
     res.json({
       success: true,
-      message: "Files uploaded to GridFS successfully",
+      message: "Files uploaded successfully",
       files: fileUrls,
       documentId: fileUpload._id.toString(),
-      collection: "fileuploads",
-      storage: "GridFS",
-      database: mongoose.connection.db.databaseName,
       uploadDuration: `${duration}ms`
     });
     
@@ -825,13 +822,13 @@ exports.uploadFiles = async (req, res) => {
     console.error("❌ Upload failed:", error);
     res.status(500).json({ 
       success: false, 
-      message: "GridFS upload failed", 
-      error: error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      message: "Upload failed", 
+      error: error.message
     });
   }
 };
 
+// Serve file by ID
 exports.serveFileById = async (req, res) => {
   try {
     const { fileId } = req.params;
@@ -840,15 +837,15 @@ exports.serveFileById = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(fileId)) {
       return res.status(400).json({ 
         success: false, 
-        message: "Invalid file ID format" 
+        message: "Invalid file ID" 
       });
     }
 
     const gfsBucket = await getGridFSBucket();
     const objectId = new mongoose.Types.ObjectId(fileId);
-    const fileArr = await gfsBucket.find({ _id: objectId }).toArray();
+    const files = await gfsBucket.find({ _id: objectId }).toArray();
     
-    if (!fileArr || fileArr.length === 0) {
+    if (!files || files.length === 0) {
       console.log("❌ File not found:", fileId);
       return res.status(404).json({ 
         success: false, 
@@ -856,13 +853,13 @@ exports.serveFileById = async (req, res) => {
       });
     }
     
-    const file = fileArr[0];
-    console.log("✅ File found:", file.filename, `(${(file.length / 1024).toFixed(2)} KB)`);
+    const file = files[0];
+    console.log("✅ Found:", file.filename);
     
     res.set("Content-Type", file.contentType || "application/octet-stream");
     res.set("Content-Disposition", `inline; filename="${file.filename}"`);
     res.set("Content-Length", file.length);
-    res.set("Cache-Control", "public, max-age=31536000"); // Cache for 1 year
+    res.set("Cache-Control", "public, max-age=31536000");
     
     const downloadStream = gfsBucket.openDownloadStream(objectId);
     
@@ -878,8 +875,9 @@ exports.serveFileById = async (req, res) => {
     });
     
     downloadStream.pipe(res);
+    
   } catch (error) {
-    console.error("❌ Serve file error:", error);
+    console.error("❌ Serve error:", error);
     res.status(500).json({ 
       success: false, 
       message: "Failed to serve file", 
@@ -888,6 +886,7 @@ exports.serveFileById = async (req, res) => {
   }
 };
 
+// Get files for a note
 exports.getFilesForNote = async (req, res) => {
   try {
     const { userId, noteId } = req.params;
@@ -899,7 +898,7 @@ exports.getFilesForNote = async (req, res) => {
       return res.json({ 
         success: true, 
         files: [], 
-        message: "No files found for this note" 
+        message: "No files found" 
       });
     }
     
@@ -919,11 +918,9 @@ exports.getFilesForNote = async (req, res) => {
       success: true,
       files: filesWithUrls,
       noteType: fileUpload.noteType,
-      createdAt: fileUpload.createdAt,
-      updatedAt: fileUpload.updatedAt,
-      storage: "GridFS",
       totalFiles: filesWithUrls.length
     });
+    
   } catch (error) {
     console.error("❌ Get files error:", error);
     res.status(500).json({ 
@@ -934,6 +931,7 @@ exports.getFilesForNote = async (req, res) => {
   }
 };
 
+// Get user files
 exports.getUserFiles = async (req, res) => {
   try {
     const { userId } = req.params;
@@ -966,8 +964,8 @@ exports.getUserFiles = async (req, res) => {
       success: true,
       data: allFiles,
       totalDocuments: fileUploads.length,
-      storage: "GridFS",
     });
+    
   } catch (error) {
     res.status(500).json({ 
       success: false, 
@@ -977,6 +975,7 @@ exports.getUserFiles = async (req, res) => {
   }
 };
 
+// Delete files for a note
 exports.deleteFilesForNote = async (req, res) => {
   try {
     const { userId, noteId } = req.params;
@@ -985,16 +984,15 @@ exports.deleteFilesForNote = async (req, res) => {
     if (!fileUpload) {
       return res.status(404).json({ 
         success: false, 
-        message: "No files found for this note" 
+        message: "No files found" 
       });
     }
 
-    // Delete files from GridFS
     for (const file of fileUpload.files) {
       try {
         await deleteFromGridFS(file.gridfsFileId);
       } catch (e) {
-        console.error("Warning: Failed to delete file from GridFS:", e);
+        console.error("Delete warning:", e);
       }
     }
     
@@ -1002,8 +1000,9 @@ exports.deleteFilesForNote = async (req, res) => {
     
     res.json({ 
       success: true, 
-      message: `Deleted ${fileUpload.files.length} file(s) from GridFS successfully` 
+      message: `Deleted ${fileUpload.files.length} file(s)` 
     });
+    
   } catch (error) {
     res.status(500).json({ 
       success: false, 
@@ -1013,6 +1012,7 @@ exports.deleteFilesForNote = async (req, res) => {
   }
 };
 
+// Delete specific file
 exports.deleteSpecificFile = async (req, res) => {
   try {
     const { userId, noteId, fileName } = req.params;
@@ -1021,7 +1021,7 @@ exports.deleteSpecificFile = async (req, res) => {
     if (!fileUpload) {
       return res.status(404).json({ 
         success: false, 
-        message: "No files found for this note" 
+        message: "No files found" 
       });
     }
 
@@ -1050,8 +1050,9 @@ exports.deleteSpecificFile = async (req, res) => {
 
     res.json({ 
       success: true, 
-      message: "File deleted from GridFS successfully" 
+      message: "File deleted" 
     });
+    
   } catch (error) {
     res.status(500).json({ 
       success: false, 

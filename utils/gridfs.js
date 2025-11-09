@@ -19,92 +19,90 @@ const mongoose = require('mongoose');
 const { GridFSBucket } = require('mongodb');
 
 let gfsBucket = null;
-let connectionPromise = null;
-
-// Ensure MongoDB connection is established
-async function ensureConnection() {
-  // If already connected, return immediately
-  if (mongoose.connection.readyState === 1) {
-    return mongoose.connection.db;
-  }
-
-  // If connection is in progress, wait for it
-  if (connectionPromise) {
-    await connectionPromise;
-    return mongoose.connection.db;
-  }
-
-  // Start new connection
-  console.log('⏳ Establishing MongoDB connection...');
-  connectionPromise = mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI, {
-    serverSelectionTimeoutMS: 10000,
-    socketTimeoutMS: 45000,
-  });
-
-  try {
-    await connectionPromise;
-    console.log('✅ MongoDB connected');
-    connectionPromise = null;
-    return mongoose.connection.db;
-  } catch (error) {
-    console.error('❌ MongoDB connection failed:', error);
-    connectionPromise = null;
-    throw error;
-  }
-}
-
-async function initGridFS() {
-  try {
-    // Ensure connection first
-    const db = await ensureConnection();
-
-    if (!db) {
-      throw new Error('Database not available after connection');
-    }
-
-    // Create new GridFS bucket
-    gfsBucket = new GridFSBucket(db, { 
-      bucketName: 'uploads' 
-    });
-
-    console.log('✅ GridFS bucket initialized');
-    return gfsBucket;
-  } catch (error) {
-    console.error('❌ GridFS initialization error:', error);
-    gfsBucket = null;
-    throw error;
-  }
-}
+let isConnecting = false;
 
 async function getGridFSBucket() {
-  // Always check connection state in serverless
-  if (mongoose.connection.readyState !== 1 || !gfsBucket) {
-    console.log('⚠️ GridFS bucket needs (re)initialization');
-    return await initGridFS();
-  }
-  
-  return gfsBucket;
-}
-
-// Helper to check if GridFS is ready
-function isGridFSReady() {
-  return gfsBucket !== null && mongoose.connection.readyState === 1;
-}
-
-// Clean up on exit (for local development)
-if (process.env.NODE_ENV !== 'production') {
-  process.on('SIGINT', async () => {
-    if (mongoose.connection.readyState === 1) {
-      await mongoose.connection.close();
-      console.log('🔌 MongoDB connection closed');
+  try {
+    // If bucket exists and connection is alive, return it
+    if (gfsBucket && mongoose.connection.readyState === 1) {
+      return gfsBucket;
     }
-    process.exit(0);
-  });
+
+    // Wait if connection is in progress
+    if (isConnecting) {
+      await new Promise(resolve => {
+        const checkInterval = setInterval(() => {
+          if (!isConnecting && mongoose.connection.readyState === 1) {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 100);
+        
+        // Timeout after 10 seconds
+        setTimeout(() => {
+          clearInterval(checkInterval);
+          resolve();
+        }, 10000);
+      });
+      
+      if (gfsBucket && mongoose.connection.readyState === 1) {
+        return gfsBucket;
+      }
+    }
+
+    // Connect to MongoDB
+    if (mongoose.connection.readyState !== 1) {
+      isConnecting = true;
+      console.log('⏳ Connecting to MongoDB...');
+      
+      const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
+      
+      if (!MONGODB_URI) {
+        throw new Error('MONGODB_URI environment variable is not set');
+      }
+
+      await mongoose.connect(MONGODB_URI, {
+        serverSelectionTimeoutMS: 10000,
+        socketTimeoutMS: 45000,
+      });
+      
+      isConnecting = false;
+      console.log('✅ MongoDB connected');
+    }
+
+    // Create GridFS bucket
+    if (!mongoose.connection.db) {
+      throw new Error('MongoDB database not available');
+    }
+
+    gfsBucket = new GridFSBucket(mongoose.connection.db, {
+      bucketName: 'uploads'
+    });
+
+    console.log('✅ GridFS bucket created');
+    return gfsBucket;
+
+  } catch (error) {
+    isConnecting = false;
+    gfsBucket = null;
+    console.error('❌ GridFS error:', error.message);
+    throw new Error(`GridFS initialization failed: ${error.message}`);
+  }
+}
+
+// Test function to verify everything works
+async function testGridFS() {
+  try {
+    const bucket = await getGridFSBucket();
+    console.log('✅ GridFS test passed');
+    return true;
+  } catch (error) {
+    console.error('❌ GridFS test failed:', error);
+    return false;
+  }
 }
 
 module.exports = { 
-  initGridFS, 
   getGridFSBucket,
-  isGridFSReady,
-  ensureConnection
+  testGridFS
 };
