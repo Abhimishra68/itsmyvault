@@ -19,35 +19,55 @@ const mongoose = require('mongoose');
 const { GridFSBucket } = require('mongodb');
 
 let gfsBucket = null;
+let connectionPromise = null;
+
+// Ensure MongoDB connection is established
+async function ensureConnection() {
+  // If already connected, return immediately
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection.db;
+  }
+
+  // If connection is in progress, wait for it
+  if (connectionPromise) {
+    await connectionPromise;
+    return mongoose.connection.db;
+  }
+
+  // Start new connection
+  console.log('⏳ Establishing MongoDB connection...');
+  connectionPromise = mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI, {
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+  });
+
+  try {
+    await connectionPromise;
+    console.log('✅ MongoDB connected');
+    connectionPromise = null;
+    return mongoose.connection.db;
+  } catch (error) {
+    console.error('❌ MongoDB connection failed:', error);
+    connectionPromise = null;
+    throw error;
+  }
+}
 
 async function initGridFS() {
   try {
-    // Wait for mongoose connection if not ready
-    if (mongoose.connection.readyState !== 1) {
-      console.log('⏳ Waiting for MongoDB connection...');
-      await new Promise((resolve, reject) => {
-        if (mongoose.connection.readyState === 1) {
-          resolve();
-        } else {
-          mongoose.connection.once('connected', resolve);
-          mongoose.connection.once('error', reject);
-          
-          // Timeout after 5 seconds
-          setTimeout(() => reject(new Error('MongoDB connection timeout')), 5000);
-        }
-      });
+    // Ensure connection first
+    const db = await ensureConnection();
+
+    if (!db) {
+      throw new Error('Database not available after connection');
     }
 
-    if (!mongoose.connection.db) {
-      throw new Error('MongoDB database not available');
-    }
-
-    // Create new bucket instance
-    gfsBucket = new GridFSBucket(mongoose.connection.db, { 
+    // Create new GridFS bucket
+    gfsBucket = new GridFSBucket(db, { 
       bucketName: 'uploads' 
     });
 
-    console.log('✅ GridFS bucket initialized successfully');
+    console.log('✅ GridFS bucket initialized');
     return gfsBucket;
   } catch (error) {
     console.error('❌ GridFS initialization error:', error);
@@ -57,14 +77,10 @@ async function initGridFS() {
 }
 
 async function getGridFSBucket() {
-  // Always reinitialize for serverless to handle cold starts
-  if (!gfsBucket || mongoose.connection.readyState !== 1) {
+  // Always check connection state in serverless
+  if (mongoose.connection.readyState !== 1 || !gfsBucket) {
     console.log('⚠️ GridFS bucket needs (re)initialization');
-    await initGridFS();
-  }
-  
-  if (!gfsBucket) {
-    throw new Error('GridFS bucket initialization failed');
+    return await initGridFS();
   }
   
   return gfsBucket;
@@ -75,8 +91,20 @@ function isGridFSReady() {
   return gfsBucket !== null && mongoose.connection.readyState === 1;
 }
 
+// Clean up on exit (for local development)
+if (process.env.NODE_ENV !== 'production') {
+  process.on('SIGINT', async () => {
+    if (mongoose.connection.readyState === 1) {
+      await mongoose.connection.close();
+      console.log('🔌 MongoDB connection closed');
+    }
+    process.exit(0);
+  });
+}
+
 module.exports = { 
   initGridFS, 
   getGridFSBucket,
-  isGridFSReady 
+  isGridFSReady,
+  ensureConnection
 };

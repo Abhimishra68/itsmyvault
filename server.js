@@ -1249,7 +1249,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const fileRoutes = require('./routes/fileRoutes');
-const { initGridFS } = require('./utils/gridfs');
+const { ensureConnection } = require('./utils/gridfs');
 
 const app = express();
 
@@ -1258,49 +1258,26 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// MongoDB Connection with proper error handling
-let isConnected = false;
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('❌ Server error:', err);
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+  });
+});
 
-const connectDB = async () => {
-  if (isConnected) {
-    console.log('✅ Using existing MongoDB connection');
-    return;
-  }
-
-  try {
-    const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
-    
-    if (!MONGODB_URI) {
-      throw new Error('MONGODB_URI is not defined in environment variables');
-    }
-
-    await mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS: 45000,
-    });
-
-    isConnected = true;
-    console.log('✅ MongoDB connected:', mongoose.connection.db.databaseName);
-    
-    // Initialize GridFS after connection
-    await initGridFS();
-    console.log('✅ GridFS initialized');
-  } catch (error) {
-    console.error('❌ MongoDB connection error:', error);
-    isConnected = false;
-    throw error;
-  }
-};
-
-// Middleware to ensure DB connection before each request
+// CRITICAL: Middleware to ensure DB connection before each request
 app.use(async (req, res, next) => {
   try {
-    await connectDB();
+    await ensureConnection();
     next();
   } catch (error) {
-    res.status(500).json({
+    console.error('❌ Database connection failed:', error);
+    res.status(503).json({
       success: false,
-      message: 'Database connection failed',
+      message: 'Database connection unavailable',
       error: error.message
     });
   }
@@ -1317,9 +1294,9 @@ app.get('/api/health', async (req, res) => {
       3: 'disconnecting'
     };
 
-    res.status(200).json({
-      success: true,
-      message: 'Server is running',
+    res.status(dbState === 1 ? 200 : 503).json({
+      success: dbState === 1,
+      message: dbState === 1 ? 'Server is running' : 'Database not connected',
       timestamp: new Date().toISOString(),
       database: mongoose.connection.db?.databaseName || 'unknown',
       dbState: states[dbState],
@@ -1362,23 +1339,20 @@ app.use((req, res) => {
   });
 });
 
-// Error handler
-app.use((err, req, res, next) => {
-  console.error('❌ Server error:', err);
-  res.status(500).json({
-    success: false,
-    message: 'Internal server error',
-    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
-  });
-});
-
 // For local development
 if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    connectDB();
-  });
+  
+  ensureConnection()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`🚀 Server running on port ${PORT}`);
+      });
+    })
+    .catch((error) => {
+      console.error('❌ Failed to start server:', error);
+      process.exit(1);
+    });
 }
 
 // Export for Vercel
